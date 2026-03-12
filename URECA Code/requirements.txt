@@ -1,4 +1,0 @@
-# Libraries
-opencv-python
-numpy
-matplotlib
