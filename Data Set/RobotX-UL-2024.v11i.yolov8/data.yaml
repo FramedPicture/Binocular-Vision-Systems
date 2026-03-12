@@ -1,0 +1,13 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 6
+names: ['Black_Buoy', 'Green_Buoy', 'Orange__Buoy', 'Red_Buoy', 'Wam_V', 'White_Buoy']
+
+roboflow:
+  workspace: senior-project-cxule
+  project: robotx-ul-2024
+  version: 11
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/senior-project-cxule/robotx-ul-2024/dataset/11
