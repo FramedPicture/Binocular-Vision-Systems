@@ -1,62 +1,70 @@
 import cv2
-import os 
 import numpy as np
 import matplotlib.pyplot as plt
+import os
 
-def step_by_step_canny(image, low_threshold=50, high_threshold=150):
-    """
-    Show each step of the Canny edge detection process
-    """
-    # Step 1: Original image
-    original = image.copy()
+def test_preprocessing_filters(image_path):
+    image = cv2.imread(image_path)
+    if image is None:
+        print("Error: Image not found!")
+        return
+
+    # gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+    # --- ACTION 1: ZERO-ORDER DERIVATIVE (Gaussian) ---
+    blurred = cv2.GaussianBlur(image, (3,9), 0)
+    blurred = cv2.cvtColor(blurred, cv2.COLOR_BGR2RGB)
+    # --- ACTION 2: FIRST-ORDER DERIVATIVES (Sobel) ---
+    kernel_h = np.array([
+        [ 1,  2,  1],
+        [ 0,  0,  0],
+        [-1, -2, -1]
+    ], dtype=np.float32)
+
+    kernel_v = np.array([
+        [ 1,  0, -1],
+        [ 2,  0, -2],
+        [ 1,  0, -1]
+    ], dtype=np.float32)
+
+    # 1. Calculate them in PARALLEL on the blurred image
+    sobel_horizontal = cv2.filter2D(blurred, cv2.CV_64F, kernel_h)
+    sobel_vertical = cv2.filter2D(blurred, cv2.CV_64F, kernel_v)
+
+    # 2. Combine them using the L2 Norm (Pythagorean theorem)
+    sobel_combined = cv2.magnitude(sobel_horizontal, sobel_vertical)
+
+    # Convert the mathematical outputs back to 8-bit visual images (0-255)
+    visual_h = cv2.convertScaleAbs(sobel_horizontal)
+    visual_v = cv2.convertScaleAbs(sobel_vertical)
+    visual_c = cv2.convertScaleAbs(sobel_combined)
+
+    # --- PLOT THE RESULTS ---
+    fig, axes = plt.subplots(1, 5, figsize=(20, 5))
     
-    # Step 2: Gaussian blur
-    blurred = cv2.GaussianBlur(image, (5, 5), 0)
-    
-    # Step 3: Gradient calculation (Sobel)
-    grad_x = cv2.Sobel(blurred, cv2.CV_64F, 1, 0, ksize=3)
-    grad_y = cv2.Sobel(blurred, cv2.CV_64F, 0, 1, ksize=3)
-    gradient_magnitude = np.sqrt(grad_x**2 + grad_y**2)
-    gradient_magnitude = np.uint8(gradient_magnitude * 255 / gradient_magnitude.max())
-    
-    # Step 4: Final Canny edges
-    edges = cv2.Canny(blurred, low_threshold, high_threshold)
-    
-    # Display all steps
-    plt.figure(figsize=(20, 10))
-    
-    images_and_titles = [
-        (original, 'Step 1: Original Image\nInput grayscale image'),
-        (blurred, 'Step 2: Gaussian Blur\nReduces noise for cleaner edges'),
-        (gradient_magnitude, 'Step 3: Gradient Magnitude\nShows edge strength (brightness)'),
-        (edges, 'Step 4: Final Edges\nAfter non-max suppression & hysteresis')
-    ]
-    
-    for i, (img, title) in enumerate(images_and_titles):
-        plt.subplot(2, 2, i + 1)
-        plt.imshow(img, cmap='gray')
-        plt.title(title, fontsize=11)
-        plt.axis('off')
-    
+    axes[0].imshow(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+    axes[0].set_title('1. Original BGR')
+    axes[0].axis('off')
+
+    axes[1].imshow(blurred, cmap='gray')
+    axes[1].set_title('2. Gaussian Blur')
+    axes[1].axis('off')
+
+    axes[2].imshow(visual_h, cmap='gray')
+    axes[2].set_title('3. Horizontal Sobel')
+    axes[2].axis('off')
+
+    axes[3].imshow(visual_v, cmap='gray')
+    axes[3].set_title('4. Vertical Sobel')
+    axes[3].axis('off')
+
+    axes[4].imshow(visual_c, cmap='gray') # FIXED: Plotted to axes[4]
+    axes[4].set_title('5. L2 Norm (Unified Edges)')
+    axes[4].axis('off')
+
     plt.tight_layout()
     plt.show()
-    
-    return edges
 
-image_path = "Test1.jpg"
-
-
-image_path = os.path.join(os.getcwd(), "Test1.jpg")
-img = cv2.imread(image_path)
-
-if img is None:
-    print("Error: Image not found or cannot be loaded.")
-    exit()
-# img_edge = cv2.Canny(img,100,200)
-
-cv2.imshow("img",img)
-# cv2.imshow("img_edge",img_edge)
-
-# img_edge2 = step_by_step_canny(img)
-cv2.waitKey(0)
-
+if __name__ == "__main__":
+    test_image = os.path.join(os.getcwd(), "Test1.jpg")
+    test_preprocessing_filters(test_image)

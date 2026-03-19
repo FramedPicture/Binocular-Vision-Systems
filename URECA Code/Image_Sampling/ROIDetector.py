@@ -1,8 +1,7 @@
 """
-Phase 1: ROI Detector
+Phase 1: ROI Detector TO BE UPDATED
 ======================
-Pipeline:
-  1. Horizon Mask   → Canny + Hough → discard rows above the horizon line
+  1. Horizon Mask   → Guassian + Sobel filter + threshold -> Hough → discard rows above the horizon line *Store Guassian & Sobel for Step 3 and Phase 2 RCE 
   2. Grid Tessellation → divide water region + 1 block above horizon into SxS blocks
   3. Dynamic Baseline  → compute median HSV of every block → "what water looks like"
   4. Anomaly Detection → flag blocks whose mean HSV deviates > threshold from baseline
@@ -14,7 +13,12 @@ Loose grid + fine grid -> run grid tesslation and Anomly detection twice
 Anomly detection -> Lower grid size, lower HSV diff threshold (less sensitive)
 
 Input : raw left-camera BGR image (np.ndarray, shape H x W x 3 HSV)
-Output: list of (crop_bgr, (x, y, w, h)) tuples
+Output: cropped 64 x 64 of guassian & soble filter (x,y,r,g,b)
+Targets[
+    id: int
+    bbox: Tuple[int, int, int, int]  # (x, y, w, h)
+    gaussian_bgr: np.ndarray         # Shape: (64, 64, 3), dtype: uint8
+    sobel_bgr: np.ndarray            # Shape: (64, 64, 3), dtype: uint8 ]
 """
 
 import cv2
@@ -22,67 +26,96 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 import time
+import numpy as np
+
+import numpy as np
 
 class ROIConfig:
-
-    #Call this with config = ROIConfig(img) 
     def __init__(
         self,
         image=None,
-        canny_low=50,
-        canny_high=150,
+        mode="sea",  
+        
+        edges_threshold=None,
+        hough_threshold=None,
+        hough_max_line_gap=None,
+        horizon_angle_tol_deg=None,
+        hue_thresh=None,
+        sat_thresh=None,
+        val_thresh=None,
+        
+        # --- NEW VARIABLES ---
+        block_variance_thresh=None,
+        width_filter_divisor=None,
+        
         hough_rho=1.0,
         hough_theta=np.pi / 180,
-        hough_threshold=50,
-        hough_min_line_length=None, #Set below 
-        hough_max_line_gap=50,
-        horizon_angle_tol_deg=15.0,
-        grid_size=8, #For grid tesslation
-        hue_thresh=20.0, #For Anomaly detection (was 40)
-        sat_thresh=20.0,
-        val_thresh=20.0,
-        min_contiguous_blocks=1, #For Neighbour mnatching
+        hough_min_line_length=None,
+        grid_size=8,
+        min_contiguous_blocks=1,
         min_crop_px=16
     ):
-        # 1. Handle Image Dimensions
+        presets = {
+            "sea": {
+                "edges_threshold": 60,
+                "hough_threshold": 120,
+                "hough_max_line_gap": 20,
+                "horizon_angle_tol_deg": 5.0,   
+                "hue_thresh": 20.0,             
+                "sat_thresh": 20.0,
+                "val_thresh": 20.0,
+                # --- NEW DEFAULTS FOR SEA ---
+                "block_variance_thresh": 40.0,
+                "width_filter_divisor": 1.5 
+            },
+            "land": {
+                "edges_threshold": 90,          
+                "hough_threshold": 150,         
+                "hough_max_line_gap": 40,       
+                "horizon_angle_tol_deg": 15.0,  
+                "hue_thresh": 40.0,             
+                "sat_thresh": 40.0,
+                "val_thresh": 40.0,
+                # --- NEW DEFAULTS FOR LAND ---
+                "block_variance_thresh": 25.0,  # Lower variance threshold for land
+                "width_filter_divisor": 1.2     # Stricter width filtering
+            }
+        }
+
+        if mode not in presets:
+            raise ValueError("Mode must be exactly 'sea' or 'land'")
+        
+        p = presets[mode]
+
+        self.edges_threshold = edges_threshold if edges_threshold is not None else p["edges_threshold"]
+        self.hough_threshold = hough_threshold if hough_threshold is not None else p["hough_threshold"]
+        self.hough_max_line_gap = hough_max_line_gap if hough_max_line_gap is not None else p["hough_max_line_gap"]
+        self.horizon_angle_tol_deg = horizon_angle_tol_deg if horizon_angle_tol_deg is not None else p["horizon_angle_tol_deg"]
+        self.hue_thresh = hue_thresh if hue_thresh is not None else p["hue_thresh"]
+        self.sat_thresh = sat_thresh if sat_thresh is not None else p["sat_thresh"]
+        self.val_thresh = val_thresh if val_thresh is not None else p["val_thresh"]
+        
+        # --- ASSIGN NEW VARIABLES ---
+        self.block_variance_thresh = block_variance_thresh if block_variance_thresh is not None else p["block_variance_thresh"]
+        self.width_filter_divisor = width_filter_divisor if width_filter_divisor is not None else p["width_filter_divisor"]
+
+        self.hough_rho = hough_rho
+        self.hough_theta = hough_theta
+        self.grid_size = grid_size
+        self.min_contiguous_blocks = min_contiguous_blocks
+        self.min_crop_px = min_crop_px
+
         self.img_width = None
         self.img_height = None
         
         if image is not None:
-            # image.shape is (height, width, channels)
             self.img_height, self.img_width = image.shape[:2]
-            
-            # Auto-calculate hough_min_line_length if not explicitly provided
             if hough_min_line_length is None:
-                hough_min_line_length = int(self.img_width * 0.3)
-        
-        # Fallback if no image and no value provided
-        if hough_min_line_length is None:
-            hough_min_line_length = 100  
-        
-        # Horizon detection
-        self.canny_low = canny_low
-        self.canny_high = canny_high
-        self.hough_rho = hough_rho
-        self.hough_theta = hough_theta
-        self.hough_threshold = hough_threshold #votes for a line
-        self.hough_min_line_length = hough_min_line_length #Adjust this to width * 0.5 for long lines only
-        self.hough_max_line_gap = hough_max_line_gap #To make it easier for lines
-        self.horizon_angle_tol_deg = horizon_angle_tol_deg
-
-        # Grid tessellation
-        self.grid_size = grid_size
-
-        # Anomaly detection
-        self.hue_thresh = hue_thresh
-        self.sat_thresh = sat_thresh
-        self.val_thresh = val_thresh
-
-        # Spatial validation
-        self.min_contiguous_blocks = min_contiguous_blocks
-
-        # Minimum crop size to pass to RCE
-        self.min_crop_px = min_crop_px
+                self.hough_min_line_length = int(self.img_width * 0.4)
+            else:
+                self.hough_min_line_length = hough_min_line_length
+        else:
+            self.hough_min_line_length = hough_min_line_length if hough_min_line_length is not None else 100
 
 class ROIDetector: 
     def __init__(self, config: ROIConfig = None):
@@ -90,20 +123,37 @@ class ROIDetector:
 
     #Step 1: Horizon mask: np.array --> y:axis int
     # y = -1 -> no horizon line
-    def detect_horizon(self, image: np.ndarray) -> int:
+    def detect_horizon(self, image: np.ndarray) -> tuple[int, np.array, np.array]:
+        #Returns: horizon level:int, blur: np.array, edges: np.array
         y = -1 
         
-        # 1. Grab the exact height and width of the current live frame!
+        # Get height and width of image
         h, w = image.shape[:2] 
 
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        blur = cv2.GaussianBlur(gray, (5, 5), 0)
+        blurred = cv2.GaussianBlur(image, (1,9), 0)
         
-        # 2. Added 'self.' to the config variables
-        edges = cv2.Canny(blur, self.config.canny_low, self.config.canny_high)
+        kernel_h = np.array([
+        [ 1,  2,  1],
+        [ 0,  0,  0],
+        [-1, -2, -1]
+        ], dtype=np.float32)
 
+        kernel_v = np.array([
+        [ 1,  0, -1],
+        [ 2,  0, -2],
+        [ 1,  0, -1]
+        ], dtype=np.float32)
+
+        sobel_horizontal = cv2.filter2D(blurred, cv2.CV_64F, kernel_h)
+        sobel_vertical = cv2.filter2D(blurred, cv2.CV_64F, kernel_v)
+        #Get L^2 through pythogoras theorem
+        sobel_combined = cv2.magnitude(sobel_horizontal, sobel_vertical)
+        # convert back to 8-bit visual images (0-255)
+        edges = cv2.convertScaleAbs(sobel_combined)
+        _, edges = cv2.threshold(edges, self.config.edges_threshold, 255, cv2.THRESH_BINARY)
+        
         horizon_lines = cv2.HoughLinesP(
-            edges, 
+            cv2.cvtColor(edges, cv2.COLOR_BGR2GRAY), 
             rho=self.config.hough_rho, 
             theta=self.config.hough_theta, 
             threshold=self.config.hough_threshold, 
@@ -113,31 +163,41 @@ class ROIDetector:
 
         if horizon_lines is not None and len(horizon_lines) > 0:
             flat_lines = [line[0] for line in horizon_lines]
-            longest_line = max(flat_lines, key=lambda p: (p[2] - p[0])**2 + (p[3] - p[1])**2) 
+            longest_line = max(flat_lines, key=lambda p: (p[2] - p[0])**2 + (p[3] - p[1])**2)
             x1, y1, x2, y2 = longest_line
-
-            if x2 != x1:
-                m = (y2 - y1) / (x2 - x1)  # Slope (m)
-                c = y1 - (m * x1)          # Intercept (c)
-            
-                left_y = int(c)
-                # 3. Use the dynamic 'w' we grabbed from the frame, NOT the config!
-                right_y = int(m * w + c)   
-                y = min(left_y, right_y)
-            else: 
-                y = min(y1, y2)
-
-        return y
+            # Midpoint Y of the longest line — avoids the old x=0 extrapolation
+            # (c = y1 - m*x1) that went negative when the segment was far from the left edge.
+            y = int((y1 + y2) / 2)
+ 
+        return (y, blurred, edges)
 
     def debug_horizon(self, image: np.ndarray):
         """Visualizer: Plots Original, Canny Edges, and Hough Lines side-by-side."""
         
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        blur = cv2.GaussianBlur(gray, (5, 5), 0)
-        edges = cv2.Canny(blur, self.config.canny_low, self.config.canny_high)
+        blurred = cv2.GaussianBlur(image, (1,9), 0)
+        
+        kernel_h = np.array([
+        [ 1,  2,  1],
+        [ 0,  0,  0],
+        [-1, -2, -1]
+        ], dtype=np.float32)
+
+        kernel_v = np.array([
+        [ 1,  0, -1],
+        [ 2,  0, -2],
+        [ 1,  0, -1]
+        ], dtype=np.float32)
+        sobel_horizontal = cv2.filter2D(blurred, cv2.CV_64F, kernel_h)
+        sobel_vertical = cv2.filter2D(blurred, cv2.CV_64F, kernel_v)
+        #Get L^2 through pythogoras theorem
+        sobel_combined = cv2.magnitude(sobel_horizontal, sobel_vertical)
+        
+        # convert back to 8-bit visual images (0-255)
+        edges = cv2.convertScaleAbs(sobel_combined)
+        _, edges = cv2.threshold(edges, self.config.edges_threshold, 255, cv2.THRESH_BINARY)
 
         horizon_lines = cv2.HoughLinesP(
-            edges, 
+            cv2.cvtColor(edges, cv2.COLOR_BGR2GRAY), 
             rho=self.config.hough_rho, 
             theta=self.config.hough_theta, 
             threshold=self.config.hough_threshold, 
@@ -153,27 +213,32 @@ class ROIDetector:
             
             for x1, y1, x2, y2 in flat_lines:
                 cv2.line(line_img, (x1, y1), (x2, y2), (255, 0, 0), 1)
-                
-            longest_line = max(flat_lines, key=lambda p: (p[2] - p[0])**2 + (p[3] - p[1])**2)
+ 
+            # Apply the same angle filter as detect_horizon
+            tol = self.config.horizon_angle_tol_deg
+            near_horizontal = [
+                (x1, y1, x2, y2) for x1, y1, x2, y2 in flat_lines
+                if abs(np.degrees(np.arctan2(abs(y2 - y1), abs(x2 - x1) + 1e-6))) <= tol
+            ]
+            if not near_horizontal:
+                near_horizontal = flat_lines
+ 
+            # Use median midpoint Y — same as the fixed detect_horizon
+            mid_ys = [(y1 + y2) / 2 for x1, y1, x2, y2 in near_horizontal]
+            y_median = int(np.median(mid_ys))
+            y_max = y_median
+ 
+            # Draw the horizon line across the full image width
+            cv2.line(line_img, (0, y_median), (self.config.img_width, y_median), (0, 0, 255), 2)
+ 
+            # Highlight the longest near-horizontal line in green for reference
+            longest_line = max(near_horizontal, key=lambda p: (p[2] - p[0])**2 + (p[3] - p[1])**2)
             x1, y1, x2, y2 = longest_line
-            
             cv2.line(line_img, (x1, y1), (x2, y2), (0, 255, 0), 4)
-
-            if x2 != x1:
-                m = (y2 - y1) / (x2 - x1)
-                c = y1 - (m * x1)
-                
-                left_y = int(c)
-                right_y = int(m * self.config.img_width + c)
-                y_max = max(left_y, right_y)
-                
-                cv2.line(line_img, (0, left_y), (self.config.img_width, right_y), (0, 0, 255), 2)
-            else:
-                y_max = max(y1, y2)
-
+ 
         img_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         line_img_rgb = cv2.cvtColor(line_img, cv2.COLOR_BGR2RGB)
-
+ 
         fig, axes = plt.subplots(1, 3, figsize=(18, 6))
         
         axes[0].imshow(img_rgb)
@@ -190,6 +255,7 @@ class ROIDetector:
         
         plt.tight_layout()
         plt.show()
+ 
 
     def tessellate_grid(self, image:np.ndarray, size:int = None) -> list[list[tuple[int, int, int, int]]]:
         #Divide image into size blocks of pixel, with coorindates,x ,y width & height 
@@ -225,16 +291,16 @@ class ROIDetector:
 
         return grid
 
-    def compute_baseline(self, image: np.ndarray, horizon_y:int) -> np.ndarray:
+    def compute_baseline(self, guassian_rgb: np.ndarray, horizon_y:int) -> np.ndarray:
         #3. Dynamic Baseline -> find the median ** MIGHT CHANGE NEXT TIME
         # If no Horizon, assume all is water. Or object is so close you cant even detect anyways
         # 1. Convert the entire image to HSV
-        hsv_image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        hsv_image = cv2.cvtColor(guassian_rgb, cv2.COLOR_BGR2HSV)
         
         # 2. Determine where to slice the image
-        if horizon_y != -1:
+        if horizon_y > 0 and horizon_y < self.config.img_height:
             # start at horizon_Y + 1 
-            start_y = max(0, horizon_y) 
+            start_y = horizon_y 
         else:
             start_y = 0 # No horizon, use the whole image
 
@@ -291,7 +357,7 @@ class ROIDetector:
                 delta = np.abs(block_hsv - water_baseline)
                 h_diff = min(delta[0], 180 - delta[0])
                 
-                if ((h_diff > h_t) or (s_diff > s_t) or (v_diff > v_t)) and (block_variance > 40.0):
+                if ((h_diff > h_t) or ...) and (block_variance > self.config.block_variance_thresh):
                     anomalies[(r, c)] = block_hsv
         
 
@@ -371,7 +437,60 @@ class ROIDetector:
             object_width = max(columns) - min(columns) + 1
             
             # Delete wide objects (the trees) (half of grid size)
-            if object_width >= self.config.grid_size * factor /2 :
+            if object_width >= (self.config.grid_size * factor) / self.config.width_filter_divisor:
+                continue
+                
+            valid_objects.append(current_object_coords)
+
+        return valid_objects
+    
+    def simple_spatial_validation(self, anomalies_dict: dict,factor:int) -> list[list[tuple[int, int]]]:
+        visited = set()
+        valid_objects = []
+        
+        # 8-way directions
+        directions = [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)]
+        color_tolerance = 30.0 # How much the Hue can change before we consider it a different object
+
+        #BFS for neighbours
+        for start_coord, start_hsv in anomalies_dict.items():
+            if start_coord in visited: #Prune those visitedd
+                continue
+                
+            current_object_coords = []
+            queue = [start_coord]
+            visited.add(start_coord)
+            
+            # The exact color of the first block in this object
+            seed_hue = start_hsv[0]
+
+            while queue:
+                curr_r, curr_c = queue.pop(0)
+                current_object_coords.append((curr_r, curr_c))
+                
+                for dr, dc in directions:
+                    neighbor = (curr_r + dr, curr_c + dc)
+                    
+                    if neighbor in anomalies_dict and neighbor not in visited:
+                        neighbor_hue = anomalies_dict[neighbor][0]
+                        
+                        # Calculate Hue difference
+                        hue_diff = min(abs(seed_hue - neighbor_hue), 180 - abs(seed_hue - neighbor_hue))
+                        
+                        # ONLY group it if it matches the color! This stops the trees.
+                        if hue_diff <= color_tolerance:
+                            visited.add(neighbor)
+                            queue.append(neighbor)
+            
+            # Min number of grids to group squares into targets
+            if len(current_object_coords) < self.config.min_contiguous_blocks:
+                continue
+                
+            columns = [c for r, c in current_object_coords]
+            object_width = max(columns) - min(columns) + 1
+            
+            # Delete wide objects (the trees) (half of grid size)
+            if object_width >= self.config.grid_size * factor / 1.5 :
                 continue
                 
             valid_objects.append(current_object_coords)
@@ -459,75 +578,83 @@ class ROIDetector:
             # 4. SLICE THE ARRAY (The actual crop!)
             bgr_crop = image[y1:y2, x1:x2]
             
-            # Optional: If you saved self.edge_map in Step 1, crop it here too!
-            # edge_crop = self.edge_map[y1:y2, x1:x2]
-            
             # 5. Resize to a standard dimension (e.g., 64x64) so the RCE network doesn't crash
             if bgr_crop.size > 0:
                 bgr_resized = cv2.resize(bgr_crop, target_size)
-                # edge_resized = cv2.resize(edge_crop, target_size)
+
                 
                 # 6. Package it as a tuple: (cropped_array, (x, y, w, h))
                 rois.append((bgr_resized, (x1, y1, w, h)))
-                
-                # If passing the edge map too, it would look like this:
-                # rois.append((bgr_resized, edge_resized, (x1, y1, w, h)))
 
         return rois
     
-    def debug_rois(self, rois: list):
+    def debug_rois(self, rois: list, rois_sobel: list):
         """
-        Visualizer: Plots a gallery of the final extracted and resized ROIs.
-        Displays a maximum of 5 ROIs per row and wraps to a new row.
+        Visualizer: Plots a gallery of the extracted ROIs.
+        Displays Gaussian and Sobel outputs side-by-side for direct comparison.
+        Max 2 targets (4 columns) per row.
         """
         num_rois = len(rois)
         
         if num_rois == 0:
             print("Debug ROIs: No valid targets found to display.")
             return
-
-        # 1. Calculate the grid dimensions (max 5 columns)
-        max_cols = 5
-        cols = min(num_rois, max_cols)
-        rows = (num_rois + max_cols - 1) // max_cols # Math trick to round up division
+        
+        # 1. Calculate grid dimensions (2 pairs per row = 4 columns max)
+        pairs_per_row = 2
+        # If there is only 1 ROI, make it 2 columns. Otherwise, 4 columns.
+        cols = min(num_rois, pairs_per_row) * 2 
+        rows = (num_rois + pairs_per_row - 1) // pairs_per_row 
 
         # 2. Create the dynamic subplots
-        fig, axes = plt.subplots(rows, cols, figsize=(4 * cols, 4 * rows))
+        fig, axes = plt.subplots(rows, cols, figsize=(3 * cols, 3 * rows))
         
-        # 3. Flatten the axes array so we can loop through it easily 
-        # (Matplotlib makes a 2D array if rows > 1, or a 1D array if rows == 1)
-        if type(axes) is np.ndarray:
+        # 3. Flatten the axes array for easy iteration
+        if isinstance(axes, np.ndarray):
             axes = axes.flatten()
         else:
-            axes = [axes] # Handle the edge case where there is exactly 1 ROI
+            axes = [axes] # Handle edge case of 1 row, 1 col (though minimum is 2 cols here)
 
-        # 4. Loop through the grid slots
-        for i, ax in enumerate(axes):
-            if i < num_rois:
-                # We have an ROI to display in this slot!
-                crop_bgr, bbox = rois[i]
-                
-                # Convert BGR to RGB for Matplotlib
-                crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
-                x, y, w, h = bbox
-                
-                ax.imshow(crop_rgb)
-                ax.set_title(f"Target {i+1}\nBBox: (x:{x}, y:{y}, w:{w}, h:{h})\nShape: {crop_rgb.shape}")
-                ax.axis('off')
-            else:
-                # We ran out of ROIs, but there are empty grid slots left. Hide them.
-                ax.axis('off')
+        # 4. Loop through the ROIs and place them in the grid pairs
+        for i in range(num_rois):
+            crop_gauss, bbox = rois[i]
+            crop_sobel, _ = rois_sobel[i] # The bounding box is identical for both
+            
+            # NOTE: If your ROIs are ALREADY in RGB format from earlier steps, 
+            # remove these cvtColor lines so you don't recreate the "orange ocean" bug!
+            rgb_gauss = cv2.cvtColor(crop_gauss, cv2.COLOR_BGR2RGB)
+            rgb_sobel = cv2.cvtColor(crop_sobel, cv2.COLOR_BGR2RGB)
+            
+            x, y, w, h = bbox
+            
+            # Calculate where this pair goes in the flattened axis array
+            gauss_idx = i * 2
+            sobel_idx = i * 2 + 1
+            
+            # Plot Gaussian
+            axes[gauss_idx].imshow(rgb_gauss)
+            axes[gauss_idx].set_title(f"Target {i+1} (Gaussian)\nBBox: (x:{x}, y:{y})")
+            axes[gauss_idx].axis('off')
+            
+            # Plot Sobel
+            axes[sobel_idx].imshow(rgb_sobel)
+            axes[sobel_idx].set_title(f"Target {i+1} (Sobel)\nShape: {w}x{h}")
+            axes[sobel_idx].axis('off')
 
-        plt.suptitle(f'Phase 1 Final Payload: {num_rois} ROIs Ready for Phase 2', fontsize=16)
+        # 5. Hide any empty grid slots at the end of the last row
+        for j in range(num_rois * 2, len(axes)):
+            axes[j].axis('off')
+
+        plt.suptitle(f'Phase 1 Final Payload: {num_rois} ROIs Extracted', fontsize=16)
         plt.tight_layout()
         plt.show()
-    
-    def process(self, image: np.ndarray):
-        #Run the whole ROIDetection
+        
+    def process(self, image: np.ndarray) -> tuple[list[np.array],list[np.array],list[np.array]]:
+        #Output 
 
         #1. Detect Horizon
         # 1. Detect Horizon
-        horizon_y = self.detect_horizon(image)
+        horizon_y,zero_order,first_order = self.detect_horizon(image)
         
         # 2. Generate Dual Grids
         factor = 2 
@@ -535,7 +662,7 @@ class ROIDetector:
         fine_grid = self.tessellate_grid(image, size=self.config.grid_size * factor)
 
         # 3. Dynamic Baseline
-        baseline = self.compute_baseline(image, horizon_y)
+        baseline = self.compute_baseline(zero_order, horizon_y)
 
         # 4. Anomaly Detection (Coarse -> Fine)
         coarse_anomalies = self.anomaly_detection(image, coarse_grid, baseline, custom_thresh=15.0)
@@ -548,24 +675,89 @@ class ROIDetector:
 
         fine_anomalies = self.anomaly_detection(
             image, fine_grid, baseline, 
-            blocks_to_check=fine_blocks_to_check, 
-            custom_thresh=35.0
+            blocks_to_check=fine_blocks_to_check
         )
 
-        # 5. Spatial Validation (Assuming you passed factor in your updated version)
         valid_objects = self.spatial_validation(fine_anomalies,factor) 
 
         # 6. ROI Crop
-        rois = self.extract_rois(image, fine_grid, valid_objects)
+        rois_gauss = self.extract_rois(zero_order, fine_grid, valid_objects)
+        rois_sobel = self.extract_rois(first_order, fine_grid, valid_objects)
+        #Zero order is guassian blurred RGB, first order is sobel RGB
+
+        final_targets = []
+        for i in range(len(rois_gauss)):
+            gauss_crop, bbox = rois_gauss[i]
+            sobel_crop, _ = rois_sobel[i] # BBox is identical, so we can ignore the second one
+            
+            target_data = {
+                "id": i,
+                "bbox": bbox,               # (x, y, w, h) from the original image
+                "gaussian_bgr": gauss_crop, # The 3 zero-order matrices BGR
+                "sobel_bgr": sobel_crop     # The 3 first-order matrices BGR
+            }
+            final_targets.append(target_data)
+
+        return final_targets
+
+    def simple_process(self, frame):
+        """
+        Bypasses the anomaly detector entirely.
+        Slices the entire image into a grid of 64x64 crops and sends 
+        EVERY block to the RCE Neural Network for evaluation.
+        """
+        targets = []
         
-        return rois
+        # 1. Get dimensions
+        h_img, w_img = frame.shape[:2]
+        
+        # 2. Compute the Phase 1 matrices for the entire image at once (Massive Optimization)
+        gaussian_bgr = cv2.GaussianBlur(frame, (1, 9), 0)
+        
+        kernel_h = np.array([[ 1,  2,  1], [ 0,  0,  0], [-1, -2, -1]], dtype=np.float32)
+        kernel_v = np.array([[ 1,  0, -1], [ 2,  0, -2], [ 1,  0, -1]], dtype=np.float32)
+        
+        sobel_h = cv2.filter2D(gaussian_bgr, cv2.CV_64F, kernel_h)
+        sobel_v = cv2.filter2D(gaussian_bgr, cv2.CV_64F, kernel_v)
+        sobel_combined = cv2.magnitude(sobel_h, sobel_v)
+        sobel_bgr = cv2.convertScaleAbs(sobel_combined)
+        
+        # 3. Slice the image into 64x64 blocks
+        crop_size = 64
+        target_id = 0
+        
+        # How many pixels the window shifts before taking the next crop.
+        # 64 = No overlap (Fastest). 32 = 50% overlap (More accurate, but 4x slower)
+        step_size = 64 
+        
+        for y in range(0, h_img - crop_size + 1, step_size):
+            for x in range(0, w_img - crop_size + 1, step_size):
+                
+                # Extract the exact 64x64 crops from the pre-calculated matrices
+                gauss_crop = gaussian_bgr[y:y+crop_size, x:x+crop_size]
+                sobel_crop = sobel_bgr[y:y+crop_size, x:x+crop_size]
+                
+                # Package it perfectly for Phase 2
+                target = {
+                    "id": target_id,
+                    "bbox": (x, y, crop_size, crop_size),
+                    "gaussian_bgr": gauss_crop,
+                    "sobel_bgr": sobel_crop
+                }
+                targets.append(target)
+                target_id += 1
+                
+        # Optional: Print out how many blocks it generated
+        # print(f"[*] Sliced image into {len(targets)} 64x64 blocks for RCE evaluation.")
+        
+        return targets
 
     def debug_process(self, image: np.ndarray):
         # 3. Call the methods directly on the instance
         print("\n--- Starting Phase 1 Debug Process ---")
         
         # 1. Detect Horizon
-        horizon_y = self.detect_horizon(image)
+        horizon_y,zero_order,first_order = self.detect_horizon(image)
         print(f"Horizon Y-Coordinate: {horizon_y}")
         self.debug_horizon(image)
 
@@ -575,7 +767,7 @@ class ROIDetector:
         fine_grid = self.tessellate_grid(image, size=self.config.grid_size * factor)
 
         # 3. Dynamic Baseline
-        baseline = self.compute_baseline(image, horizon_y)
+        baseline = self.compute_baseline(zero_order, horizon_y)
         print(f"Water Baseline Median HSV: {baseline}")
 
         # 4. Anomaly Detection (Coarse -> Fine)
@@ -600,8 +792,61 @@ class ROIDetector:
         self.debug_spatial_validation(image, fine_grid, valid_objects)
 
         # 6. ROI Crop
-        rois = self.extract_rois(image, fine_grid, valid_objects)
-        self.debug_rois(rois)
+        rois = self.extract_rois(zero_order, fine_grid, valid_objects)
+        rois_sobel = self.extract_rois(first_order, fine_grid, valid_objects)
+        
+        # New call passing both lists:
+        self.debug_rois(rois, rois_sobel)
+        
+        return (rois, zero_order, first_order)
+    
+    def debug_simple_process(self, image: np.ndarray):
+        # 3. Call the methods directly on the instance
+        print("\n--- Starting Phase 1 Debug Process ---")
+        
+        # 1. Detect Horizon
+        _,zero_order,first_order = self.detect_horizon(image)
+        print(f"Horizon Y-Coordinate: {0}")
+        self.debug_horizon(image)
+
+        # 2. Generate Dual Grids
+        factor = 2 
+        coarse_grid = self.tessellate_grid(image, size=self.config.grid_size)
+        fine_grid = self.tessellate_grid(image, size=self.config.grid_size * factor)
+
+        # 3. Dynamic Baseline
+        # baseline = self.compute_baseline(zero_order, 0)
+        print(f"Water Baseline Median HSV: {0,0,0}")
+
+        # 4. Anomaly Detection (Coarse -> Fine)
+        coarse_anomalies = self.anomaly_detection(image, coarse_grid, (0,0,0), custom_thresh=15.0)
+        self.debug_anomalies(image, coarse_grid, coarse_anomalies)
+
+        fine_blocks_to_check = []
+        for r, c in coarse_anomalies.keys():
+            for i in range(factor):
+                for j in range(factor):
+                    fine_blocks_to_check.append((r * factor + i, c * factor + j))
+
+        fine_anomalies = self.anomaly_detection(
+            image, fine_grid, (0,0,0), 
+            blocks_to_check=fine_blocks_to_check, 
+            custom_thresh=35.0
+        )
+        self.debug_anomalies(image, fine_grid, fine_anomalies)
+
+        # 5. Spatial Validation
+        valid_objects = self.simple_spatial_validation(fine_anomalies,factor)
+        self.debug_spatial_validation(image, fine_grid, valid_objects)
+
+        # 6. ROI Crop
+        rois = self.extract_rois(zero_order, fine_grid, valid_objects)
+        rois_sobel = self.extract_rois(first_order, fine_grid, valid_objects)
+        
+        # New call passing both lists:
+        self.debug_rois(rois, rois_sobel)
+        
+        return (rois, zero_order, first_order)
 
     def run_live_feed(self, video_source=0):
         cap = cv2.VideoCapture(video_source)
@@ -679,7 +924,7 @@ if __name__ == "__main__":
     # Use 0 for your webcam, or put a path to an mp4 file like "TestVideo.mp4"
     #roi_detector.run_live_feed(video_source=0)
     
-    image_path = os.path.join(os.getcwd(), "Test2.jpg")
+    image_path = os.path.join(os.getcwd(), "test_4_red_cross.jpg")
     img = cv2.imread(image_path)
     # cv2.imshow("img",img)
     # cv2.waitKey(0)
@@ -689,4 +934,6 @@ if __name__ == "__main__":
     config = ROIConfig(img)
     roi_detector = ROIDetector(config)
 
-    roi_detector.debug_process(img)
+    roi_detector.debug_simple_process(img)
+    targets = roi_detector.simple_process(img)
+
