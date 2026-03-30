@@ -85,7 +85,8 @@ def run_image_inference(image_path: str, rce_config: RCEConfig, mode: str):
     roi_detector = ROIDetector(config)
     
     print("Processing image...")
-    targets = roi_detector.process(frame)
+    # targets = roi_detector.process(frame)
+    targets = roi_detector.simple_process(frame)
     if targets:
         live_results = recognizer.recognize(targets)
         frame = draw_bounding_boxes(frame, live_results)
@@ -167,9 +168,11 @@ if __name__ == "__main__":
     # ---------------------------------------------------------
     TRAINING_PATHS = {
         "Red Cross": "./training/RedCross",
+        # "RedGreenPole": "./training/RedGreenPole",
+        # "Coffee": "./training/Coffee"
     }
     
-    TEST_PHOTO_PATH = "./test_4_red_cross.jpg"
+    TEST_PHOTO_PATH = "./RedCross.jpg"
     TEST_VIDEO_PATH = "./test_video.mp4"
     
     # ---------------------------------------------------------

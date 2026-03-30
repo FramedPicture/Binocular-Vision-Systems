@@ -10,7 +10,7 @@ Targets[
 Output: Object classification & coordinates on image
         [Bounding Box, Label, Confidence]
 ======================
-Feature matrix Fj (24 x 1 int matrix)
+Feature matrix Fj (24 x 1 int Vector)
 Guassaian R G B (3) x mean_energy, var_energy, var_x_energy, var_y_energy(4) = 12 x 1  scalar 
 Sobel R G B (3) x mean_energy, var_energy, var_x_energy, var_y_energy(4) = 12 x 1 scalar 
 Total = 1D Array of 24 x 1 floating-point numbers
@@ -54,7 +54,7 @@ class RCEConfig:
     def __init__(self):
         self.p_min = 0.5 
         self.epsilon = 1e-8 
-        self.min_sigma = 0.1
+        self.min_sigma = 70
         self.db_filepath = "rce_database.txt" # The persistence file
 
 class FeatureExtractor:
@@ -122,7 +122,7 @@ class RCECognizer:
             "std_dev": float(std_dev)
         }
         
-        with open(self.config.db_filepath, 'a') as f:
+        with open(self.config.db_filepath, 'w') as f:
             f.write(json.dumps(node) + "\n")
             
         print(f"Successfully saved '{label}' to {self.config.db_filepath}")
@@ -170,6 +170,9 @@ class RCERecognizer:
                 sigma = node["std_dev"]
                 
                 dist_sq = np.dot((live_fv - mean_vec).T, (live_fv - mean_vec))[0, 0]
+
+                print(f"[*] Testing {node['label']} | Dist Sq: {dist_sq:.2f} | Sigma: {sigma:.4f}")
+
                 score = np.exp(-dist_sq / (2 * (sigma ** 2)))
                 
                 if score > best_score:

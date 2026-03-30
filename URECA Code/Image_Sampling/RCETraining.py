@@ -66,7 +66,7 @@ def preprocess_and_train(folder_path: str, label: str, cognizer: 'RCECognizer', 
         resized_img = cv2.resize(img, target_size)
         
         # 2. Mimic Phase 1 pipeline to get the exact matrices needed
-        gaussian_bgr = cv2.GaussianBlur(resized_img, (1, 9), 0)
+        gaussian_bgr = cv2.GaussianBlur(resized_img, (5,5), 0)
         
         sobel_h = cv2.filter2D(gaussian_bgr, cv2.CV_64F, kernel_h)
         sobel_v = cv2.filter2D(gaussian_bgr, cv2.CV_64F, kernel_v)
