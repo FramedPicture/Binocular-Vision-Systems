@@ -122,7 +122,7 @@ class RCECognizer:
             "std_dev": float(std_dev)
         }
         
-        with open(self.config.db_filepath, 'w') as f:
+        with open(self.config.db_filepath, 'a') as f:
             f.write(json.dumps(node) + "\n")
             
         print(f"Successfully saved '{label}' to {self.config.db_filepath}")
