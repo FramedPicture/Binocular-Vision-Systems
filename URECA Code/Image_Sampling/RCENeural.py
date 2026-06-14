@@ -28,10 +28,6 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 import time
-
-import os
-import cv2
-import numpy as np
 import json
 from typing import List, Tuple, TypedDict
 

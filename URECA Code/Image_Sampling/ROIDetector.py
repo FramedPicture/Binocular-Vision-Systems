@@ -26,9 +26,6 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 import time
-import numpy as np
-
-import numpy as np
 
 class ROIConfig:
     def __init__(
@@ -53,8 +50,9 @@ class ROIConfig:
         hough_theta=np.pi / 180,
         hough_min_line_length=None,
         grid_size=4,
-        min_contiguous_blocks=1,
-        min_crop_px=16
+        min_contiguous_blocks=None,
+        min_crop_px=16,
+        use_otsu=True
     ):
         presets = {
             "sea": {
@@ -109,8 +107,8 @@ class ROIConfig:
         self.hough_rho = hough_rho
         self.hough_theta = hough_theta
         self.grid_size = grid_size
-        self.min_contiguous_blocks = min_contiguous_blocks
         self.min_crop_px = min_crop_px
+        self.use_otsu = use_otsu
 
         self.img_width = None
         self.img_height = None
@@ -157,7 +155,12 @@ class ROIDetector:
         sobel_combined = cv2.magnitude(sobel_horizontal, sobel_vertical)
         # convert back to 8-bit visual images (0-255)
         edges = cv2.convertScaleAbs(sobel_combined)
-        _, edges = cv2.threshold(edges, self.config.edges_threshold, 255, cv2.THRESH_BINARY)
+        if self.config.use_otsu:
+            edges_gray = cv2.cvtColor(edges, cv2.COLOR_BGR2GRAY)
+            otsu_thresh, _ = cv2.threshold(edges_gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            _, edges = cv2.threshold(edges, int(otsu_thresh), 255, cv2.THRESH_BINARY)
+        else:
+            _, edges = cv2.threshold(edges, self.config.edges_threshold, 255, cv2.THRESH_BINARY)
         
         horizon_lines = cv2.HoughLinesP(
             cv2.cvtColor(edges, cv2.COLOR_BGR2GRAY), 
@@ -201,7 +204,12 @@ class ROIDetector:
         
         # convert back to 8-bit visual images (0-255)
         edges = cv2.convertScaleAbs(sobel_combined)
-        _, edges = cv2.threshold(edges, self.config.edges_threshold, 255, cv2.THRESH_BINARY)
+        if self.config.use_otsu:
+            edges_gray = cv2.cvtColor(edges, cv2.COLOR_BGR2GRAY)
+            otsu_thresh, _ = cv2.threshold(edges_gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            _, edges = cv2.threshold(edges, int(otsu_thresh), 255, cv2.THRESH_BINARY)
+        else:
+            _, edges = cv2.threshold(edges, self.config.edges_threshold, 255, cv2.THRESH_BINARY)
 
         horizon_lines = cv2.HoughLinesP(
             cv2.cvtColor(edges, cv2.COLOR_BGR2GRAY), 
@@ -353,7 +361,6 @@ class ROIDetector:
         for r, c in blocks_to_check:
             x, y, w, h = grid[r][c]
             block_pixels = hsv_image[y:y+h, x:x+w]
-            block_hsv = np.mean(block_pixels, axis=(0, 1))
  
             if block_pixels.size > 0:
                 block_hsv = np.mean(block_pixels, axis=(0, 1))
@@ -864,71 +871,6 @@ class ROIDetector:
         
         return (rois, zero_order, first_order)
 
-    def run_live_feed(self, video_source=0):
-        cap = cv2.VideoCapture(video_source)
-        
-        if not cap.isOpened():
-            print(f"Error: Could not open video source {video_source}")
-            return
-
-        print("Starting Live Feed... Press 'q' to quit.")
-
-        prev_time = time.perf_counter()
-        fps = 0.0
-
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                print("End of video stream.")
-                break
-
-            start_process = time.perf_counter()
-            
-            # FIXED: Calls its own process method
-            rois = self.process(frame)
-            
-            end_process = time.perf_counter()
-            
-            process_time_ms = (end_process - start_process) * 1000
-            
-            curr_time = time.perf_counter()
-            fps_instant = 1.0 / (curr_time - prev_time)
-            fps = fps * 0.9 + fps_instant * 0.1 
-            prev_time = curr_time
-
-            display_frame = frame.copy()
-            
-            for i, (crop, (x, y, w, h)) in enumerate(rois):
-                cv2.rectangle(display_frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-                label = f"Target {i+1}"
-                cv2.putText(display_frame, label, (x, max(0, y - 10)), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-
-            overlay = display_frame.copy()
-            cv2.rectangle(overlay, (0, 0), (350, 140), (0, 0, 0), -1)
-            cv2.addWeighted(overlay, 0.4, display_frame, 0.6, 0, display_frame)
-            
-            cv2.putText(display_frame, "VISION SYSTEM DASHBOARD", (15, 30), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-            
-            fps_color = (0, 255, 0) if fps > 20 else (0, 0, 255)
-            cv2.putText(display_frame, f"FPS: {fps:.1f}", (15, 65), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, fps_color, 2)
-                        
-            cv2.putText(display_frame, f"Process Time: {process_time_ms:.1f} ms", (15, 95), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-            
-            target_color = (0, 255, 0) if len(rois) > 0 else (200, 200, 200)
-            cv2.putText(display_frame, f"Active Targets: {len(rois)}", (15, 125), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, target_color, 2)
-
-            cv2.imshow("Phase 1 - Real-Time Output", display_frame)
-
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
-                
-        cap.release()
-        cv2.destroyAllWindows()
     # =========================================================================
     #  INTERACTIVE CONFIG TUNER
     # =========================================================================
@@ -959,6 +901,7 @@ class ROIDetector:
         print(f"│  grid_size              = {c.grid_size}")
         print(f"│  min_contiguous_blocks  = {c.min_contiguous_blocks}")
         print(f"│  color_tolerance        = {c.color_tolerance}")
+        print(f"│  use_otsu               = {c.use_otsu}")
         print("└──────────────────────────────────────────────────┘")
  
     def interactive_tuner(self, source) -> 'ROIConfig':
@@ -1026,9 +969,19 @@ class ROIDetector:
 
         def _nothing(_): pass
 
-        # ── 3. Trackbars ─────────────────────────────────────────────────────
+        # ── 3. Compute Otsu on first frame to seed Edges Threshold ────────
+        _init_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        _init_blur = cv2.GaussianBlur(_init_gray, (5, 5), 0)
+        _init_sob_h = cv2.filter2D(_init_blur, cv2.CV_64F, np.array([[ 1,2,1],[0,0,0],[-1,-2,-1]], dtype=np.float32))
+        _init_sob_v = cv2.filter2D(_init_blur, cv2.CV_64F, np.array([[ 1,0,-1],[2,0,-2],[1,0,-1]], dtype=np.float32))
+        _init_mag   = cv2.convertScaleAbs(cv2.magnitude(_init_sob_h, _init_sob_v))
+        otsu_initial, _ = cv2.threshold(_init_mag, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        otsu_initial = int(otsu_initial)
+        print(f"[Tuner] Otsu auto-computed initial Edges Threshold: {otsu_initial}")
+
+        # ── 4. Trackbars ─────────────────────────────────────────────────────
         bars = [
-            ("Edges Threshold",    int(np.clip(initial_cfg.edges_threshold,       0, 255)),  255),
+            ("Edges Threshold",    otsu_initial,                                                255),
             ("Hough Threshold",    int(np.clip(initial_cfg.hough_threshold,        1, 300)),  300),
             ("Min Line Len",       int(np.clip(initial_cfg.hough_min_line_length,  1, w_img)), w_img),
             ("Max Line Gap",       int(np.clip(initial_cfg.hough_max_line_gap,     0, 200)),  200),
@@ -1039,8 +992,8 @@ class ROIDetector:
             ("Block Var x10",      int(np.clip(initial_cfg.block_variance_thresh * 10, 0, 2000)), 2000),
             ("Width Div x10",      int(np.clip(initial_cfg.width_filter_divisor * 10, 1, 50)),   50),
             ("Grid Size",          int(np.clip(initial_cfg.grid_size,             2, 32)),    32),
-            ("Fine Multiplier",    2,                                                         10), # NEW
-            ("Color Tol x10",      int(np.clip(initial_cfg.color_tolerance * 10,   0, 1800)), 1800), # NEW (Max Hue is 180)
+            ("Fine Multiplier",    2,                                                         10),
+            ("Color Tol x10",      int(np.clip(initial_cfg.color_tolerance * 10,   0, 1800)), 1800),
             ("Min Blob Blocks",    int(np.clip(initial_cfg.min_contiguous_blocks, 1, 20)),    20),
         ]
         for label, init_val, max_val in bars:
@@ -1208,7 +1161,7 @@ class ROIDetector:
 
             elif key == ord('r'):
                 reset_map = {
-                    "Edges Threshold":  int(initial_cfg.edges_threshold),
+                    "Edges Threshold":  otsu_initial,
                     "Hough Threshold":  int(initial_cfg.hough_threshold),
                     "Min Line Len":     int(initial_cfg.hough_min_line_length),
                     "Max Line Gap":     int(initial_cfg.hough_max_line_gap),
@@ -1302,62 +1255,62 @@ class ROIDetector:
         cap.release()
         cv2.destroyAllWindows()
 
-# --- EXECUTION BLOCK ---
-if __name__ == "__main__":
-    # Create an empty config (it will auto-calculate sizes based on the first frame it sees)
-    config = ROIConfig()
-    roi_detector = ROIDetector(config)
-    
-    # Run the live feed! 
-    # Use 0 for your webcam, or put a path to an mp4 file like "TestVideo.mp4"
-    #roi_detector.run_live_feed(video_source=0)
-    
-    image_path = os.path.join(os.getcwd(), "Test1.jpg")
-    img = cv2.imread(image_path)
-    # cv2.imshow("img",img)
-    # cv2.waitKey(0)
-    if img is None:
-        print("ERROR! NO IMG FOUND!")
-        exit()
-    config = ROIConfig(img)
-    roi_detector = ROIDetector(config)
-
-    roi_detector.debug_simple_process(img)
-    targets = roi_detector.simple_process(img)
-
 # # --- EXECUTION BLOCK ---
 # if __name__ == "__main__":
-#     # ── Option A: tune on a static image ──────────────────────────────────
-#     # Opens 4 live windows + a trackbar control panel.
-#     # Drag sliders to watch every pipeline stage update in real time.
-#     # Press S to print the values you like, Q to quit.
+#     # Create an empty config (it will auto-calculate sizes based on the first frame it sees)
+#     config = ROIConfig()
+#     roi_detector = ROIDetector(config)
     
-#     # ── Option B: live webcam ─────────────────────────────────────────────
-#     # config       = ROIConfig()
-#     # roi_detector = ROIDetector(config)
-#     # tuned_config = roi_detector.interactive_tuner(source=0)
-    
-#     # ── Option C: video file ──────────────────────────────────────────────
-#     # config       = ROIConfig()
-#     # roi_detector = ROIDetector(config)
-#     # tuned_config = roi_detector.interactive_tuner(source="TestVideo.mp4")
- 
-#     # config = ROIConfig()
-#     # roi_detector = ROIDetector(config)
+#     # Run the live feed! 
+#     # Use 0 for your webcam, or put a path to an mp4 file like "TestVideo.mp4"
+#     #roi_detector.run_live_feed(video_source=0)
     
 #     image_path = os.path.join(os.getcwd(), "Test1.jpg")
 #     img = cv2.imread(image_path)
+#     # cv2.imshow("img",img)
+#     # cv2.waitKey(0)
 #     if img is None:
 #         print("ERROR! NO IMG FOUND!")
 #         exit()
- 
-#     config = ROIConfig(img,"sea")
+#     config = ROIConfig(img)
 #     roi_detector = ROIDetector(config)
+
+#     roi_detector.debug_simple_process(img)
+#     targets = roi_detector.simple_process(img)
+
+# --- EXECUTION BLOCK ---
+if __name__ == "__main__":
+    # ── Option A: tune on a static image ──────────────────────────────────
+    # Opens 4 live windows + a trackbar control panel.
+    # Drag sliders to watch every pipeline stage update in real time.
+    # Press S to print the values you like, Q to quit.
+    
+    # ── Option B: live webcam ─────────────────────────────────────────────
+    # config       = ROIConfig()
+    # roi_detector = ROIDetector(config)
+    # tuned_config = roi_detector.interactive_tuner(source=0)
+    
+    # ── Option C: video file ──────────────────────────────────────────────
+    # config       = ROIConfig()
+    # roi_detector = ROIDetector(config)
+    # tuned_config = roi_detector.interactive_tuner(source="TestVideo.mp4")
  
-#     # ── Static-image interactive tuner ────────────────────────────────────
-#     tuned_config = roi_detector.interactive_tuner(img)
-#     # tuned_config = roi_detector.interactive_tuner(source = 0)
+    # config = ROIConfig()
+    # roi_detector = ROIDetector(config)
+    
+    image_path = os.path.join(os.getcwd(), "Test2.jpg")
+    img = cv2.imread(image_path)
+    if img is None:
+        print("ERROR! NO IMG FOUND!")
+        exit()
  
-#     # # After tuning, run the pipeline with the locked-in settings
-#     # targets = roi_detector.simple_process(img)
+    config = ROIConfig(img,"sea")
+    roi_detector = ROIDetector(config)
+ 
+    # ── Static-image interactive tuner ────────────────────────────────────
+    tuned_config = roi_detector.interactive_tuner(img)
+    # tuned_config = roi_detector.interactive_tuner(source = 0)
+ 
+    # # After tuning, run the pipeline with the locked-in settings
+    # targets = roi_detector.simple_process(img)
 
