@@ -167,12 +167,12 @@ if __name__ == "__main__":
     # 2. FILE PATHS
     # ---------------------------------------------------------
     TRAINING_PATHS = {
-        "Red Cross": "./training/RedCross",
-        "Red Buoy": "./training/RedBuoy",
+        # "Red Cross": "./training/RedCross",
+        "Red Buoy": "./training/red_buoy",
         # "Coffee": "./training/Coffee"
     }
     
-    TEST_PHOTO_PATH = "./RedCross.jpg"
+    TEST_PHOTO_PATH = "./test_red.jpg"
     TEST_VIDEO_PATH = "./test_video.mp4"
     
     # ---------------------------------------------------------
@@ -186,7 +186,7 @@ if __name__ == "__main__":
         
     if RUN_PHOTO_TEST:
         print(f"\n=== Running Inference on Photo: {TEST_PHOTO_PATH} ===")
-        run_image_inference(TEST_PHOTO_PATH, config, "land")
+        run_image_inference(TEST_PHOTO_PATH, config, "sea")
         
     if RUN_VIDEO_TEST:
         print(f"\n=== Running Inference on Video: {TEST_VIDEO_PATH} ===")

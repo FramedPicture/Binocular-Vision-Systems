@@ -56,22 +56,39 @@ class ROIConfig:
     ):
         presets = {
             "sea": {
-                "edges_threshold": 56,
-                "hough_threshold": 120,
-                "hough_max_line_gap": 20,
+                "edges_threshold": 42,
+                "hough_threshold": 82,
+                "hough_min_line_length": 207,
+                "hough_max_line_gap": 19,
                 "horizon_angle_tol_deg": 5.0,   
-                "hue_thresh": 43.0,             
-                "sat_thresh": 39.0,
-                "val_thresh": 18.0,
+                "hue_thresh": 24.0,             
+                "sat_thresh": 61.0,
+                "val_thresh": 130.0,
                 # --- NEW DEFAULTS FOR SEA ---
                 "block_variance_thresh": 25.1,
                 "width_filter_divisor": 2.8,
-                "min_contiguous_blocks": 5,
+                "min_contiguous_blocks": 1,
+                "color_tolerance": 20.8,
+            },
+            "sea2":{
+                "edges_threshold": 42,
+                "hough_threshold": 82,
+                "hough_min_line_length": 207,
+                "hough_max_line_gap": 19,
+                "horizon_angle_tol_deg": 5.0,   
+                "hue_thresh": 82.0,             
+                "sat_thresh": 64.0,
+                "val_thresh": 130.0,
+                # --- NEW DEFAULTS FOR SEA ---
+                "block_variance_thresh": 25.1,
+                "width_filter_divisor": 2.8,
+                "min_contiguous_blocks": 1,
                 "color_tolerance": 20.8,
             },
             "land": {
                 "edges_threshold": 60,          
-                "hough_threshold": 120,         
+                "hough_threshold": 120,
+                "hough_min_line_length": 100,         
                 "hough_max_line_gap": 20,       
                 "horizon_angle_tol_deg": 15.0,  
                 "hue_thresh": 1.0,             
@@ -92,6 +109,7 @@ class ROIConfig:
 
         self.edges_threshold = edges_threshold if edges_threshold is not None else p["edges_threshold"]
         self.hough_threshold = hough_threshold if hough_threshold is not None else p["hough_threshold"]
+        self.hough_min_line_length = hough_min_line_length if hough_min_line_length is not None else p["hough_min_line_length"]
         self.hough_max_line_gap = hough_max_line_gap if hough_max_line_gap is not None else p["hough_max_line_gap"]
         self.horizon_angle_tol_deg = horizon_angle_tol_deg if horizon_angle_tol_deg is not None else p["horizon_angle_tol_deg"]
         self.hue_thresh = hue_thresh if hue_thresh is not None else p["hue_thresh"]
@@ -113,14 +131,15 @@ class ROIConfig:
         self.img_width = None
         self.img_height = None
         
-        if image is not None:
-            self.img_height, self.img_width = image.shape[:2]
-            if hough_min_line_length is None:
-                self.hough_min_line_length = int(self.img_width * 0.4)
-            else:
-                self.hough_min_line_length = hough_min_line_length
-        else:
-            self.hough_min_line_length = hough_min_line_length if hough_min_line_length is not None else 100
+        
+        # if image is not None:
+        #     self.img_height, self.img_width = image.shape[:2]
+        #     if hough_min_line_length is None:
+        #         self.hough_min_line_length = int(self.img_width * 0.4)
+        #     else:
+        #         self.hough_min_line_length = hough_min_line_length
+        # else:
+        #     self.hough_min_line_length = hough_min_line_length if hough_min_line_length is not None else 100
 
 class ROIDetector: 
     def __init__(self, config: ROIConfig = None):
@@ -173,11 +192,19 @@ class ROIDetector:
 
         if horizon_lines is not None and len(horizon_lines) > 0:
             flat_lines = [line[0] for line in horizon_lines]
-            longest_line = max(flat_lines, key=lambda p: (p[2] - p[0])**2 + (p[3] - p[1])**2)
-            x1, y1, x2, y2 = longest_line
-            # Midpoint Y of the longest line — avoids the old x=0 extrapolation
-            # (c = y1 - m*x1) that went negative when the segment was far from the left edge.
-            y = int((y1 + y2) / 2)
+            tol = self.config.horizon_angle_tol_deg
+            near_horizontal = [
+                (x1, y1, x2, y2) for x1, y1, x2, y2 in flat_lines
+                if abs(np.degrees(np.arctan2(abs(y2-y1), abs(x2-x1)+1e-6))) <= tol
+            ]
+            if near_horizontal:
+                flat_lines = near_horizontal  # Only use filtered lines
+            longest_line = max(flat_lines, key=lambda p: (p[2]-p[0])**2 + (p[3]-p[1])**2)
+            # longest_line = max(flat_lines, key=lambda p: (p[2] - p[0])**2 + (p[3] - p[1])**2)
+            # x1, y1, x2, y2 = longest_line
+            # # Midpoint Y of the longest line — avoids the old x=0 extrapolation
+            # # (c = y1 - m*x1) that went negative when the segment was far from the left edge.
+            # y = int((y1 + y2) / 2)
  
         return (y, blurred, edges)
 
@@ -670,7 +697,6 @@ class ROIDetector:
     def process(self, image: np.ndarray) -> tuple[list[np.array],list[np.array],list[np.array]]:
         #Output 
 
-        #1. Detect Horizon
         # 1. Detect Horizon
         horizon_y,zero_order,first_order = self.detect_horizon(image)
         
@@ -970,18 +996,18 @@ class ROIDetector:
         def _nothing(_): pass
 
         # ── 3. Compute Otsu on first frame to seed Edges Threshold ────────
-        _init_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        _init_blur = cv2.GaussianBlur(_init_gray, (5, 5), 0)
-        _init_sob_h = cv2.filter2D(_init_blur, cv2.CV_64F, np.array([[ 1,2,1],[0,0,0],[-1,-2,-1]], dtype=np.float32))
-        _init_sob_v = cv2.filter2D(_init_blur, cv2.CV_64F, np.array([[ 1,0,-1],[2,0,-2],[1,0,-1]], dtype=np.float32))
-        _init_mag   = cv2.convertScaleAbs(cv2.magnitude(_init_sob_h, _init_sob_v))
-        otsu_initial, _ = cv2.threshold(_init_mag, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        otsu_initial = int(otsu_initial)
-        print(f"[Tuner] Otsu auto-computed initial Edges Threshold: {otsu_initial}")
+        # _init_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        # _init_blur = cv2.GaussianBlur(_init_gray, (5, 5), 0)
+        # _init_sob_h = cv2.filter2D(_init_blur, cv2.CV_64F, np.array([[ 1,2,1],[0,0,0],[-1,-2,-1]], dtype=np.float32))
+        # _init_sob_v = cv2.filter2D(_init_blur, cv2.CV_64F, np.array([[ 1,0,-1],[2,0,-2],[1,0,-1]], dtype=np.float32))
+        # _init_mag   = cv2.convertScaleAbs(cv2.magnitude(_init_sob_h, _init_sob_v))
+        # otsu_initial, _ = cv2.threshold(_init_mag, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        # otsu_initial = int(otsu_initial)
+        # print(f"[Tuner] Otsu auto-computed initial Edges Threshold: {otsu_initial}")
 
         # ── 4. Trackbars ─────────────────────────────────────────────────────
         bars = [
-            ("Edges Threshold",    otsu_initial,                                                255),
+            ("Edges Threshold",    int(np.clip(initial_cfg.edges_threshold)), 255),
             ("Hough Threshold",    int(np.clip(initial_cfg.hough_threshold,        1, 300)),  300),
             ("Min Line Len",       int(np.clip(initial_cfg.hough_min_line_length,  1, w_img)), w_img),
             ("Max Line Gap",       int(np.clip(initial_cfg.hough_max_line_gap,     0, 200)),  200),
@@ -1298,7 +1324,7 @@ if __name__ == "__main__":
     # config = ROIConfig()
     # roi_detector = ROIDetector(config)
     
-    image_path = os.path.join(os.getcwd(), "Test2.jpg")
+    image_path = os.path.join(os.getcwd(), "test_red4.jpg")
     img = cv2.imread(image_path)
     if img is None:
         print("ERROR! NO IMG FOUND!")
